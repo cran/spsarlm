@@ -81,6 +81,12 @@ print.summary.sarlm <- function(x, digits = max(5, .Options$digits - 3),
 	else structure(quantile(resid), names = nam)
 	print(rq, digits = digits, ...)
 	cat("\nType:", x$type, "\n")
+	if (x$zero.policy) {
+		zero.regs <- attr(ret, "zero.regs")
+		if (!is.null(zero.regs))
+			cat("Regions with no neighbours included:\n",
+			zero.regs, "\n")
+	}
 	cat("Coefficients:", x$coeftitle, "\n")
 	print.coefmat(x$Coef, signif.stars=signif.stars, digits=digits,
 		na.print="")

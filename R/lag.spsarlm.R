@@ -12,7 +12,7 @@
 #
 
 lagsarlm <- function(formula, data = list(), listw, type="lag",
-	method="eigen", quiet=T) {
+	method="eigen", quiet=T, zero.policy=FALSE) {
 	mt <- terms(formula, data = data)
 	mf <- lm(formula, data, method="model.frame")
 	if (missing(listw)) stop("No neighbourhood list")
@@ -21,21 +21,26 @@ lagsarlm <- function(formula, data = list(), listw, type="lag",
 		stop("\nUnknown model type\n"))
 	cat("\nJacobian calculated using ")
 	switch(method, eigen = cat("neighbourhood matrix eigenvalues\n"),
-		sparse = cat("sparse matrix techniques\n"),
+#		sparse = cat("sparse matrix techniques\n"),
 		stop("...\nUnknown method\n"))
 	y <- model.response(mf, "numeric")
+	if (any(is.na(y))) stop("NAs in dependent variable")
 	x <- model.matrix(mt, mf)
+	if (any(is.na(x))) stop("NAs in independent variable")
 	if (NROW(x) != length(listw$neighbours))
 		stop("Input data and weights have different dimensions")
 	n <- NROW(x)
 	m <- NCOL(x)
 	xcolnames <- colnames(x)
 	K <- ifelse(xcolnames[1] == "(Intercept)", 2, 1)
-	wy <- lag.listw(listw, y)
+	wy <- lag.listw(listw, y, zero.policy=zero.policy)
+	if (any(is.na(wy))) stop("NAs in lagged dependent variable")
 	if (type != "lag") {
 		WX <- matrix(nrow=n,ncol=(m-(K-1)))
 		for (k in K:m) {
-			wx <- lag.listw(listw, x[,k])
+			wx <- lag.listw(listw, x[,k], zero.policy=zero.policy)
+			if (any(is.na(wx))) 
+				stop("NAs in lagged independent variable")
 			WX[,(k-(K-1))] <- wx
 		}
 		xxcolnames <- character(2*m - (K-1))
@@ -62,9 +67,9 @@ lagsarlm <- function(formula, data = list(), listw, type="lag",
 		opt <- optimize(sar.lag.mixed.f, interval=eig.range,
 			maximum=T, tol=.Machine$double.eps^0.5, eig=eig,
 			e.a=e.a, e.b=e.b, e.c=e.c, n=n, quiet=quiet)
-	} else {
-		opt <- dosparse(listw, y, x, wy, K, quiet)
-	}
+	} #else {
+	#	opt <- dosparse(listw, y, x, wy, K, quiet)
+	#}
 	rho <- c(opt$maximum)
 	LL <- c(opt$objective)
 	lm.lag <- lm((y - rho*wy) ~ x - 1)
@@ -73,14 +78,14 @@ lagsarlm <- function(formula, data = list(), listw, type="lag",
 	names(coef.rho) <- colnames(x)
 	SSE <- deviance(lm.lag)
 	s2 <- SSE/n
-	if (method != "eigen") {
-		LLs <- opt$LLs
-		lm.null <- opt$lm.null
-		rest.se <- NULL
-		rho.se <- NULL
-		LMtest <- NULL
-		ase <- FALSE
-	} else {
+#	if (method != "eigen") {
+#		LLs <- opt$LLs
+#		lm.null <- opt$lm.null
+#		rest.se <- NULL
+#		rho.se <- NULL
+#		LMtest <- NULL
+#		ase <- FALSE
+#	} else {
 		LLs <- NULL
 		tr <- function(A) sum(diag(A))
 		O <- (eig/(1-rho*eig))^2
@@ -107,7 +112,7 @@ lagsarlm <- function(formula, data = list(), listw, type="lag",
 		LMtest <- ((t(r) %*% W %*% r)/s2)^2
 		LMtest <- LMtest/(T22 - ((T21A^2)*(rho.se^2)))
 		ase <- TRUE
-	}
+#	}
 	call <- match.call()
 	ret <- structure(list(type=type, rho=rho, 
 		coefficients=coef.rho, rest.se=rest.se, 
@@ -115,8 +120,14 @@ lagsarlm <- function(formula, data = list(), listw, type="lag",
 		method=method, call=call, residuals=r, 
 		lm.target=lm.lag, fitted.values=predict(lm.lag),
 		se.fit=predict(lm.lag, se.fit=TRUE)$se.fit,
-		ase=ase, LLs=LLs, rho.se=rho.se, LMtest=LMtest),
-		class=c("sarlm"))
+		ase=ase, LLs=LLs, rho.se=rho.se, LMtest=LMtest, 
+		zero.policy=zero.policy), class=c("sarlm"))
+	if (zero.policy) {
+		zero.regs <- attr(new, 
+			"region.id")[which(card(listw$neighbours) == 0)]
+		if (length(zero.regs) > 0)
+			attr(ret, "zero.regs") <- zero.regs
+	}
 	ret
 }
 
@@ -130,55 +141,55 @@ sar.lag.mixed.f <- function(rho, eig, e.a, e.b, e.c, n, quiet)
 	ret
 }
 
-sar.lag.mixed.f.s <- function(rho, sn, e.a, e.b, e.c, n, quiet)
-{
-	SSE <- e.a - 2*rho*e.b + rho*rho*e.c
-	s2 <- SSE/n
-	ret <- (log.spwdet(sparseweights=sn, rho=rho) - ((n/2)*log(2*pi))
-		- (n/2)*log(s2) - (1/(2*s2))*SSE)
-	if (!quiet) cat("Rho:\t", rho, "\tfunction value:\t", ret, "\n")
-	ret
-}
+#sar.lag.mixed.f.s <- function(rho, sn, e.a, e.b, e.c, n, quiet)
+#{
+#	SSE <- e.a - 2*rho*e.b + rho*rho*e.c
+#	s2 <- SSE/n
+#	ret <- (log.spwdet(sparseweights=sn, rho=rho) - ((n/2)*log(2*pi))
+#		- (n/2)*log(s2) - (1/(2*s2))*SSE)
+#	if (!quiet) cat("Rho:\t", rho, "\tfunction value:\t", ret, "\n")
+#	ret
+#}
 
 
-dosparse <- function (listw, y, x, wy, K, quiet) {
-	sn <- listw2sn(listw)
-	m <- ncol(x)
-	n <- nrow(x)
-	LLs <- vector(mode="list", length=length(K:m))
-	j <- 1
-	for (i in K:m) {
-		thisx <- x[,-i]
-		lm.null <- lm.fit(thisx, y)
-		lm.w <- lm.fit(thisx, wy)
-		e.null <- lm.null$residuals
-		e.w <- lm.w$residuals
-		e.a <- t(e.null) %*% e.null
-		e.b <- t(e.w) %*% e.null
-		e.c <- t(e.w) %*% e.w
-		LLs[[j]] <- optimize(sar.lag.mixed.f.s, interval=c(-1,1),
-		maximum=T, tol=.Machine$double.eps^0.5, sn=sn,
-		e.a=e.a, e.b=e.b, e.c=e.c, n=n, quiet=quiet)$objective
-		attr(LLs[[j]], "nall") <- n
-		attr(LLs[[j]], "nobs") <- n
-		attr(LLs[[j]], "df") <- m-1
-		attr(LLs[[j]], "name") <- colnames(x)[i]
-		class(LLs[[j]]) <- "logLik"
-		j <- j + 1
-	}
-	lm.null <- lm(y ~ x - 1)
-	lm.w <- lm.fit(x, wy)
-	e.null <- lm.null$residuals
-	e.w <- lm.w$residuals
-	e.a <- t(e.null) %*% e.null
-	e.b <- t(e.w) %*% e.null
-	e.c <- t(e.w) %*% e.w
-	sn <- listw2sn(listw)
-	opt <- optimize(sar.lag.mixed.f.s, interval=c(-1,1),
-		maximum=T, tol=.Machine$double.eps^0.5, sn=sn,
-		e.a=e.a, e.b=e.b, e.c=e.c, n=n, quiet=quiet)
-	maximum <- opt$maximum
-	objective <- opt$objective
-	res <- list(maximum=maximum, objective=objective, LLs=LLs,
-		lm.null=lm.null)
-}
+#dosparse <- function (listw, y, x, wy, K, quiet) {
+#	sn <- listw2sn(listw)
+#	m <- ncol(x)
+#	n <- nrow(x)
+#	LLs <- vector(mode="list", length=length(K:m))
+#	j <- 1
+#	for (i in K:m) {
+#		thisx <- x[,-i]
+#		lm.null <- lm.fit(thisx, y)
+#		lm.w <- lm.fit(thisx, wy)
+#		e.null <- lm.null$residuals
+#		e.w <- lm.w$residuals
+#		e.a <- t(e.null) %*% e.null
+#		e.b <- t(e.w) %*% e.null
+#		e.c <- t(e.w) %*% e.w
+#		LLs[[j]] <- optimize(sar.lag.mixed.f.s, interval=c(-1,1),
+#		maximum=T, tol=.Machine$double.eps^0.5, sn=sn,
+#		e.a=e.a, e.b=e.b, e.c=e.c, n=n, quiet=quiet)$objective
+#		attr(LLs[[j]], "nall") <- n
+#		attr(LLs[[j]], "nobs") <- n
+#		attr(LLs[[j]], "df") <- m-1
+#		attr(LLs[[j]], "name") <- colnames(x)[i]
+#		class(LLs[[j]]) <- "logLik"
+#		j <- j + 1
+#	}
+#	lm.null <- lm(y ~ x - 1)
+#	lm.w <- lm.fit(x, wy)
+#	e.null <- lm.null$residuals
+#	e.w <- lm.w$residuals
+#	e.a <- t(e.null) %*% e.null
+#	e.b <- t(e.w) %*% e.null
+#	e.c <- t(e.w) %*% e.w
+#	sn <- listw2sn(listw)
+#	opt <- optimize(sar.lag.mixed.f.s, interval=c(-1,1),
+#		maximum=T, tol=.Machine$double.eps^0.5, sn=sn,
+#		e.a=e.a, e.b=e.b, e.c=e.c, n=n, quiet=quiet)
+#	maximum <- opt$maximum
+#	objective <- opt$objective
+#	res <- list(maximum=maximum, objective=objective, LLs=LLs,
+#		lm.null=lm.null)
+#}
